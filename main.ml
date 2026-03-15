@@ -98,6 +98,32 @@ let display path (_opam, problems) =
     Fmt.(styled `Bold string) pkg
     pp_problems problems
 
+let rec strip_outer_parens s =
+  let len = String.length s in
+  if len < 2 || s.[0] <> '(' || s.[len - 1] <> ')' then
+    s
+  else
+    let depth = ref 0 in
+    let wraps_whole_string = ref true in
+    for i = 0 to len - 2 do
+      match s.[i] with
+      | '(' -> incr depth
+      | ')' ->
+        decr depth;
+        if !depth = 0 && i < len - 2 then wraps_whole_string := false
+      | _ -> ()
+    done;
+    if !wraps_whole_string then
+      strip_outer_parens (String.sub s 1 (len - 2))
+    else
+      s
+
+let complex_formula_matches_desired current desired =
+  Formula.equal_filtered_formula current desired
+  && String.equal
+       (strip_outer_parens (Change_with_hint.string_of_filtered_formula current))
+       (strip_outer_parens (Change_with_hint.string_of_filtered_formula desired))
+
 let generate_report ~supports_complex_changes ~index ~opam pkg =
   let build = get_libraries ~pkg ~target:`Install |> to_opam_set ~index in
   let test = get_libraries ~pkg ~target:`Runtest |> to_opam_set ~index in
@@ -115,7 +141,7 @@ let generate_report ~supports_complex_changes ~index ~opam pkg =
     OpamPackage.Map.to_seq build
     |> List.of_seq
     |> List.concat_map (fun (dep, dep_info) ->
-        let dep_name = OpamPackage.name dep in
+      let dep_name = OpamPackage.name dep in
         let hint = dep_info.Dune_project.Deps.dirs in
         let desired =
           Formula.dep_formula ~with_test:false ~enabled_if:dep_info.enabled_if dep
@@ -123,7 +149,7 @@ let generate_report ~supports_complex_changes ~index ~opam pkg =
         if not (Dune_rules.Enabled_if.is_always dep_info.enabled_if) then
           if supports_complex_changes then
             match current_dep_formula dep_name with
-            | Some current when Formula.equal_filtered_formula current desired -> []
+            | Some current when complex_formula_matches_desired current desired -> []
             | _ -> [`Set_dep_formula (dep_name, desired), hint]
           else
             Fmt.failwith
@@ -163,7 +189,7 @@ let generate_report ~supports_complex_changes ~index ~opam pkg =
           if not (Dune_rules.Enabled_if.is_always dep_info.enabled_if) then
             if supports_complex_changes then
               match current_dep_formula dep_name with
-              | Some current when Formula.equal_filtered_formula current desired -> []
+              | Some current when complex_formula_matches_desired current desired -> []
               | _ -> [`Set_dep_formula (dep_name, desired), hint]
             else
               Fmt.failwith

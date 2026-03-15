@@ -74,3 +74,37 @@ Check that the OCaml-version-gated dependency is preserved as a conditional opam
   $ opam-dune-lint
   test.opam: OK
   Warning in test: The package has a dune-project file but no explicit dependency on dune was found.
+
+Equivalent but noisier conditional formulas should be rewritten back to the canonical form:
+
+  $ cat > test.opam << EOF
+  > # Preserve comments
+  > opam-version: "2.0"
+  > synopsis: "Test package"
+  > build: [
+  >   ["dune" "build"]
+  > ]
+  > depends: [
+  >   "base"
+  >   ("ocaml" {< "5.2.0"} & "ocaml" {< "5.2.0"} | (("ocaml" {>= "5.2.0"} | "ocaml" {>= "5.2.0"}) & "fmt" {>= "1.0"}))
+  > ]
+  > EOF
+
+  $ opam-dune-lint -f
+  test.opam: changes needed:
+    ("ocaml" {< "5.2.0"} | ("ocaml" {>= "5.2.0"} & "fmt" {>= "1.0"})) [from /]
+  Note: version numbers are just suggestions based on the currently installed version.
+  Wrote "./test.opam"
+  Warning in test: The package has a dune-project file but no explicit dependency on dune was found.
+
+  $ cat test.opam | sed 's/= [^&)}]*/= */g'
+  # Preserve comments
+  opam-version: "2.0"
+  synopsis: "Test package"
+  build: [
+    ["dune" "build"]
+  ]
+  depends: [
+    "base"
+    ("ocaml" {< "5.2.0"} | ("ocaml" {>= *} & "fmt" {>= *}))
+  ]

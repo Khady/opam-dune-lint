@@ -119,6 +119,9 @@ let apply_change items = function
           Sexp.List [a; atom ":with-test"]
         | x -> x
       )
+  | `Set_dep_formula _ ->
+    Fmt.failwith
+      "Conditional dependency formulas cannot be represented in dune-project depends. Disable generate_opam_files to apply them."
 
 let apply_changes ~changes items =
   List.fold_left apply_change items changes

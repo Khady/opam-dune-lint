@@ -32,6 +32,7 @@ let () =
   | x -> Fmt.epr "WARNING: bad sexp from opam config env: %a@." Sexplib.Sexp.pp_hum x
 
 let get_libraries ~pkg ~target = Dune_project.Deps.get_external_lib_deps ~pkg ~target
+let ocaml = OpamPackage.Name.of_string "ocaml"
 
 let to_opam ~index lib =
   match Astring.String.take ~sat:((<>) '.') lib with
@@ -45,11 +46,22 @@ let to_opam ~index lib =
       Fmt.pr "WARNING: can't find opam package providing %S!@." lib;
       Some (OpamPackage.create (OpamPackage.Name.of_string lib) (OpamPackage.Version.of_string "0"))
 
-(* Convert a map of (ocamlfind-library -> hints) to a map of (opam-package -> hints). *)
 let to_opam_set ~index libs =
-  Libraries.fold (fun lib dirs acc ->
+  Libraries.fold (fun lib dep_info acc ->
       match to_opam ~index lib with
-      | Some pkg -> OpamPackage.Map.update pkg (Dir_set.union dirs) Dir_set.empty acc
+      | Some pkg ->
+        let dep_info =
+          match OpamPackage.Map.find_opt pkg acc with
+          | None -> dep_info
+          | Some dep_info2 ->
+            {
+              Dune_project.Deps.dirs = Dir_set.union dep_info.Dune_project.Deps.dirs dep_info2.Dune_project.Deps.dirs;
+              enabled_if =
+                Dune_rules.Enabled_if.or_
+                  [dep_info.Dune_project.Deps.enabled_if; dep_info2.Dune_project.Deps.enabled_if];
+            }
+        in
+        OpamPackage.Map.add pkg dep_info acc
       | None -> acc
     ) libs OpamPackage.Map.empty
 
@@ -86,35 +98,94 @@ let display path (_opam, problems) =
     Fmt.(styled `Bold string) pkg
     pp_problems problems
 
-let generate_report ~index ~opam pkg =
+let generate_report ~supports_complex_changes ~index ~opam pkg =
   let build = get_libraries ~pkg ~target:`Install |> to_opam_set ~index in
   let test = get_libraries ~pkg ~target:`Runtest |> to_opam_set ~index in
   let opam_deps =
     OpamFormula.And (OpamFile.OPAM.depends opam, OpamFile.OPAM.depopts opam)
     |> Formula.classify in
+  let current_dep_formula dep_name =
+    Formula.find_dep_formula (OpamFile.OPAM.depends opam) dep_name
+  in
+  let current_formula_is_complex = function
+    | None -> false
+    | Some formula -> OpamPackage.Name.Set.mem ocaml (OpamFormula.all_names formula)
+  in
   let build_problems =
     OpamPackage.Map.to_seq build
     |> List.of_seq
-    |> List.concat_map (fun (dep, hint) ->
+    |> List.concat_map (fun (dep, dep_info) ->
         let dep_name = OpamPackage.name dep in
-        match OpamPackage.Name.Map.find_opt dep_name opam_deps with
-        | Some `Build -> []
-        | Some `Test -> [`Remove_with_test dep_name, hint]
-        | None -> [`Add_build_dep dep, hint]
+        let hint = dep_info.Dune_project.Deps.dirs in
+        let desired =
+          Formula.dep_formula ~with_test:false ~enabled_if:dep_info.enabled_if dep
+        in
+        if not (Dune_rules.Enabled_if.is_always dep_info.enabled_if) then
+          if supports_complex_changes then
+            match current_dep_formula dep_name with
+            | Some current when Formula.equal_filtered_formula current desired -> []
+            | _ -> [`Set_dep_formula (dep_name, desired), hint]
+          else
+            Fmt.failwith
+              "Conditional enabled_if dependencies are only supported when updating opam files directly."
+        else
+          let classify_simple_dep () =
+            match OpamPackage.Name.Map.find_opt dep_name opam_deps with
+            | Some `Build -> []
+            | Some `Test -> [`Remove_with_test dep_name, hint]
+            | None -> [`Add_build_dep dep, hint]
+          in
+          match current_dep_formula dep_name with
+          | Some current ->
+            if current_formula_is_complex (Some current) then
+              if supports_complex_changes then
+                [`Set_dep_formula (dep_name, desired), hint]
+              else
+                Fmt.failwith
+                "Non-trivial dependency formulas are only supported when updating opam files directly."
+            else
+              classify_simple_dep ()
+          | None -> classify_simple_dep ()
       )
   in
   let test_problems =
     test
     |> OpamPackage.Map.to_seq
     |> List.of_seq
-    |> List.concat_map (fun (dep, hint) ->
+    |> List.concat_map (fun (dep, dep_info) ->
         if OpamPackage.Map.mem dep build then []
         else (
           let dep_name = OpamPackage.name dep in
-          match OpamPackage.Name.Map.find_opt dep_name opam_deps with
-          | Some `Test -> []
-          | Some `Build -> [`Add_with_test dep_name, hint]
-          | None -> [`Add_test_dep dep, hint]
+          let hint = dep_info.Dune_project.Deps.dirs in
+          let desired =
+            Formula.dep_formula ~with_test:true ~enabled_if:dep_info.enabled_if dep
+          in
+          if not (Dune_rules.Enabled_if.is_always dep_info.enabled_if) then
+            if supports_complex_changes then
+              match current_dep_formula dep_name with
+              | Some current when Formula.equal_filtered_formula current desired -> []
+              | _ -> [`Set_dep_formula (dep_name, desired), hint]
+            else
+              Fmt.failwith
+                "Conditional enabled_if dependencies are only supported when updating opam files directly."
+          else
+            let classify_simple_dep () =
+              match OpamPackage.Name.Map.find_opt dep_name opam_deps with
+              | Some `Test -> []
+              | Some `Build -> [`Add_with_test dep_name, hint]
+              | None -> [`Add_test_dep dep, hint]
+            in
+            match current_dep_formula dep_name with
+            | Some current ->
+              if current_formula_is_complex (Some current) then
+                if supports_complex_changes then
+                  [`Set_dep_formula (dep_name, desired), hint]
+                else
+                  Fmt.failwith
+                    "Non-trivial dependency formulas are only supported when updating opam files directly."
+              else
+                classify_simple_dep ()
+            | None -> classify_simple_dep ()
         )
       )
   in
@@ -192,7 +263,7 @@ let main force dir =
       Fmt.pr "%s: %s after its upgrade from 'dune describe opam-files'!@." path (string_of_check msg)
     );
   opam_files |> Paths.mapi (fun path opam ->
-      (opam, generate_report ~index ~opam (Filename.chop_suffix path ".opam"))
+      (opam, generate_report ~supports_complex_changes:(not (Dune_project.generate_opam_enabled project)) ~index ~opam (Filename.chop_suffix path ".opam"))
     )
   |> fun report ->
   Paths.iter display report;

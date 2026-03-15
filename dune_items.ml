@@ -20,7 +20,8 @@ module Describe_external_lib = struct
       external_deps : (string * Kind.t) list;
       internal_deps : (string * Kind.t) list;
       source_dir: Fpath.t;
-      extensions: string list
+      extensions: string list;
+      enabled_if: Dune_rules.Enabled_if.t;
     }
 
   let dump_item =
@@ -30,7 +31,8 @@ module Describe_external_lib = struct
       external_deps = [];
       internal_deps = [];
       source_dir = Fpath.v ".";
-      extensions = []
+      extensions = [];
+      enabled_if = Dune_rules.Enabled_if.always;
     }
 
   type t = Lib of item | Exe of item | Test of item

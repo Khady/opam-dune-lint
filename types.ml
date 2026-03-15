@@ -19,7 +19,8 @@ module Change = struct
     [ `Remove_with_test of OpamPackage.Name.t
     | `Add_with_test of OpamPackage.Name.t
     | `Add_build_dep of OpamPackage.t
-    | `Add_test_dep of OpamPackage.t ]
+    | `Add_test_dep of OpamPackage.t
+    | `Set_dep_formula of OpamPackage.Name.t * OpamTypes.filtered_formula ]
 end
 
 module List = struct
@@ -57,7 +58,46 @@ module Change_with_hint = struct
     | `Remove_with_test _
     | `Add_with_test _ -> false
     | `Add_build_dep _
-    | `Add_test_dep _ -> true
+    | `Add_test_dep _
+    | `Set_dep_formula _ -> true
+
+  let rec string_of_filter = function
+    | OpamTypes.FBool true -> "true"
+    | OpamTypes.FBool false -> "false"
+    | OpamTypes.FString s -> Fmt.str "%S" s
+    | OpamTypes.FIdent ([], var, None) -> OpamVariable.to_string var
+    | OpamTypes.FIdent _ -> "<filter>"
+    | OpamTypes.FDefined filter -> Fmt.str "?%s" (string_of_filter filter)
+    | OpamTypes.FUndef filter -> Fmt.str "!?%s" (string_of_filter filter)
+    | OpamTypes.FNot filter -> Fmt.str "!%s" (string_of_filter filter)
+    | OpamTypes.FAnd (x, y) -> Fmt.str "%s & %s" (string_of_filter x) (string_of_filter y)
+    | OpamTypes.FOr (x, y) -> Fmt.str "%s | %s" (string_of_filter x) (string_of_filter y)
+    | OpamTypes.FOp (x, rel, y) ->
+      Fmt.str "%s %s %s" (string_of_filter x) (OpamFormula.string_of_relop rel) (string_of_filter y)
+
+  let string_of_filtered_formula formula =
+    let mask_version name version =
+      if Sys.getenv_opt "OPAM_DUNE_LINT_TESTS" = Some "y"
+         && OpamPackage.Name.to_string name <> "ocaml"
+      then
+        "1.0"
+      else
+        version
+    in
+    let string_of_condition name =
+      OpamFormula.string_of_formula (function
+          | OpamTypes.Constraint (rel, OpamTypes.FString version) ->
+            Fmt.str "%s %S" (OpamFormula.string_of_relop rel) (mask_version name version)
+          | OpamTypes.Constraint (rel, filter) ->
+            Fmt.str "%s %s" (OpamFormula.string_of_relop rel) (string_of_filter filter)
+          | OpamTypes.Filter filter -> string_of_filter filter)
+    in
+    OpamFormula.string_of_formula (fun (name, condition) ->
+        let name_quoted = Fmt.str "%a" pp_name name in
+        match condition with
+        | OpamFormula.Empty -> name_quoted
+        | _ -> Fmt.str "%s {%s}" name_quoted (string_of_condition name condition))
+      formula
 
   let pp f (c, dirs) =
     let dirs =
@@ -69,6 +109,7 @@ module Change_with_hint = struct
       | `Add_with_test name -> Fmt.str "%a {with-test}" pp_name name, ["(missing {with-test} annotation)"]
       | `Add_build_dep dep -> Fmt.str "%a {>= \"%s\"}" pp_name (OpamPackage.name dep) (version_to_string dep), []
       | `Add_test_dep dep -> Fmt.str "%a {with-test & >= \"%s\"}" pp_name (OpamPackage.name dep) (version_to_string dep), []
+      | `Set_dep_formula (_name, formula) -> string_of_filtered_formula formula, []
     in
     let hint =
       if Dir_set.is_empty dirs then hint

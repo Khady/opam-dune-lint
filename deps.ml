@@ -1,7 +1,13 @@
 open Types
 open Dune_items
 
-type t = Dir_set.t Libraries.t
+type dep =
+  {
+    dirs: Dir_set.t;
+    enabled_if: Dune_rules.Enabled_if.t;
+  }
+
+type t = dep Libraries.t
 
 let dune_describe_external_lib_deps () = Bos.Cmd.(v "dune" % "describe" % "external-lib-deps")
 
@@ -114,6 +120,22 @@ let resolve_internal_deps d_items items_pkg =
   in
   add_internal (Hashtbl.create 10) items_pkg
 
+let d_item_with_enabled_if d_item =
+  let kind, wrap =
+    match d_item with
+    | Describe_external_lib.Lib _ -> Dune_rules.Enabled_if.Lib, (fun item -> Describe_external_lib.Lib item)
+    | Describe_external_lib.Exe _ -> Dune_rules.Enabled_if.Exe, (fun item -> Describe_external_lib.Exe item)
+    | Describe_external_lib.Test _ -> Dune_rules.Enabled_if.Test, (fun item -> Describe_external_lib.Test item)
+  in
+  let item = Describe_external_lib.get_item d_item in
+  let enabled_if =
+    Dune_rules.Enabled_if.get_enabled_if
+      ~kind
+      ~source_dir:item.source_dir
+      ~name:item.name
+  in
+  wrap { item with enabled_if }
+
 let get_dune_items dir_types ~pkg ~target =
   let d_items =
     Lazy.force describe_external_lib_deps
@@ -152,6 +174,7 @@ let get_dune_items dir_types ~pkg ~target =
               | None -> d_item
               | Some entry -> Describe_external_lib.Exe { item with package = Some entry.package })
         | d_item -> d_item)
+    |> List.map d_item_with_enabled_if
     |> List.filter (fun item ->
         match (item,target) with
         | Describe_external_lib.Test _, `Install -> false
@@ -169,16 +192,76 @@ let get_dune_items dir_types ~pkg ~target =
         Option.equal String.equal (Some pkg) item.package || Option.is_none item.package) d_items
   |> resolve_internal_deps d_items
 
+let item_name = function
+  | Describe_external_lib.Lib item -> item.name ^ ".lib"
+  | Describe_external_lib.Exe item -> item.name ^ ".exe"
+  | Describe_external_lib.Test item -> item.name ^ ".test"
+
 let lib_deps ~pkg ~target =
-  get_dune_items (Hashtbl.create 10) ~pkg ~target
-  |> List.fold_left (fun libs item ->
-      let item = Describe_external_lib.get_item item in
-      List.map (fun dep -> fst dep, item.source_dir) item.external_deps
-      |> List.fold_left (fun acc (lib, path) ->
+  let d_items = get_dune_items (Hashtbl.create 10) ~pkg ~target in
+  let items_by_name =
+    d_items
+    |> List.filter_map (function
+        | Describe_external_lib.Lib item as d_item -> Some (item.name ^ ".lib", d_item)
+        | _ -> None)
+    |> List.to_seq
+    |> Hashtbl.of_seq
+  in
+  let resolved = Hashtbl.create 16 in
+  let rec add_items = function
+    | [] -> ()
+    | (d_item, inherited_enabled_if) :: rest ->
+      let item = Describe_external_lib.get_item d_item in
+      let enabled_if =
+        Dune_rules.Enabled_if.and_ [inherited_enabled_if; item.enabled_if]
+      in
+      if Dune_rules.Enabled_if.is_never enabled_if then
+        add_items rest
+      else
+        let name = item_name d_item in
+        let previous =
+          match Hashtbl.find_opt resolved name with
+          | None -> Dune_rules.Enabled_if.never
+          | Some (_, enabled_if) -> enabled_if
+        in
+        let merged_enabled_if = Dune_rules.Enabled_if.or_ [previous; enabled_if] in
+        if Dune_rules.Enabled_if.equal previous merged_enabled_if then
+          add_items rest
+        else begin
+          Hashtbl.replace resolved name (d_item, merged_enabled_if);
+          let internal_items =
+            item.internal_deps
+            |> List.filter_map (fun (name, _) ->
+                match Hashtbl.find_opt items_by_name (name ^ ".lib") with
+                | None -> None
+                | Some d_item_lib ->
+                  if Option.is_some (Describe_external_lib.get_item d_item_lib).package then None
+                  else Some (d_item_lib, merged_enabled_if))
+          in
+          add_items (internal_items @ rest)
+        end
+  in
+  add_items (List.map (fun d_item -> d_item, Dune_rules.Enabled_if.always) d_items);
+  Hashtbl.to_seq_values resolved
+  |> List.of_seq
+  |> List.fold_left (fun libs (d_item, enabled_if) ->
+      let item = Describe_external_lib.get_item d_item in
+      List.fold_left (fun acc (lib, _) ->
           if Astring.String.take ~sat:((<>) '.') lib <> pkg then
-            let dirs = Libraries.find_opt lib acc |> Option.value ~default:Dir_set.empty in
-            Libraries.add lib (Dir_set.add path dirs) acc
+            let dep =
+              match Libraries.find_opt lib acc with
+              | None ->
+                { dirs = Dir_set.singleton item.source_dir; enabled_if }
+              | Some dep ->
+                {
+                  dirs = Dir_set.add item.source_dir dep.dirs;
+                  enabled_if = Dune_rules.Enabled_if.or_ [dep.enabled_if; enabled_if];
+                }
+            in
+            Libraries.add lib dep acc
           else
-            acc) libs) Libraries.empty
+            acc)
+        libs item.external_deps)
+    Libraries.empty
 
 let get_external_lib_deps ~pkg ~target : t = lib_deps ~pkg ~target

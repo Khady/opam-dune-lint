@@ -32,10 +32,18 @@ Create a simple dune project with an OCaml-version-gated public library:
   >  (modules ocaml5_lib)
   >  (libraries fmt)
   >  (enabled_if (>= %{ocaml_version} 5.2.0)))
+  > 
+  > (library
+  >  (name ocaml5_lib_2)
+  >  (public_name test.ocaml5_lib_2)
+  >  (modules ocaml5_lib_2)
+  >  (libraries fmt)
+  >  (enabled_if (>= %{ocaml_version} 5.2.0)))
   > EOF
 
   $ echo 'let x = 1' > base_lib.ml
   $ echo 'let x = 2' > ocaml5_lib.ml
+  $ echo 'let x = 3' > ocaml5_lib_2.ml
   $ dune build
 
 Replace all version numbers with "1.0" to get predictable output.

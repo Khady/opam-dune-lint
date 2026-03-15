@@ -143,6 +143,7 @@ module Enabled_if = struct
         |> List.map normalize
         |> List.concat_map (function And ys -> ys | y -> [y])
         |> List.filter (fun x -> not (is_always x))
+        |> List.sort_uniq Stdlib.compare
       in
       if List.exists is_never xs then Never
       else
@@ -156,6 +157,7 @@ module Enabled_if = struct
         |> List.map normalize
         |> List.concat_map (function Or ys -> ys | y -> [y])
         |> List.filter (fun x -> not (is_never x))
+        |> List.sort_uniq Stdlib.compare
       in
       if List.exists is_always xs then Always
       else
